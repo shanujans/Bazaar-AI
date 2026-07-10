@@ -146,7 +146,8 @@ def main():
     # --- Routing log sanity ---
     try:
         log = get_json("/api/routing-log?limit=5")
-        check("/api/routing-log returns entries", isinstance(log, list) and len(log) > 0)
+        entries = log.get("entries") if isinstance(log, dict) else None
+        check("/api/routing-log returns entries", isinstance(entries, list) and len(entries) > 0)
     except Exception as e:
         check("Routing log check", False, str(e))
 
