@@ -25,11 +25,14 @@ compute/VRAM avoided, not dollars saved.
 import os
 import time
 import logging
+from datetime import datetime, timezone
 from typing import List, Dict
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Form
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
+from twilio.twiml.messaging_response import MessagingResponse
 
 # ---------------------------------------------------------------------------
 # Configuration (override via env vars — handy for pointing at mock_servers.py)
@@ -66,6 +69,24 @@ METRICS = {
     "fallback_calls": 0,
     "total_calls": 0,
 }
+
+# ---------------------------------------------------------------------------
+# In-memory routing log — powers the dashboard's live "Routing Log" feed.
+# Newest entries are appended; capped so a long-running demo doesn't leak
+# memory. Swap for Redis/Postgres if you take this past the hackathon.
+# ---------------------------------------------------------------------------
+ROUTING_LOG_MAX_ENTRIES = 200
+ROUTING_LOG: List[Dict] = []
+
+# ---------------------------------------------------------------------------
+# Per-sender conversation memory for WhatsApp threads (Twilio webhooks are
+# stateless — each request only gives us the latest `Body`/`From`). Keeping
+# a short rolling history per phone number lets the "multi-turn negotiation"
+# signal in ComputeRouter actually fire on real WhatsApp conversations,
+# not just on the `/api/chat/` payload's explicit conversation_history.
+# ---------------------------------------------------------------------------
+WHATSAPP_HISTORY_MAX_TURNS = 20
+WHATSAPP_HISTORY: Dict[str, List["ConversationTurn"]] = {}
 
 # ---------------------------------------------------------------------------
 # Pydantic schemas
@@ -327,6 +348,8 @@ async def health():
         "edge_endpoint": EDGE_ENDPOINT_URL,
         "heavy_model": HEAVY_MODEL_NAME,
         "heavy_endpoint": HEAVY_ENDPOINT_URL,
+        "whatsapp_webhook": "/api/whatsapp/",
+        "routing_log_entries": len(ROUTING_LOG),
     }
 
 
@@ -347,25 +370,35 @@ async def metrics():
     }
 
 
-@app.post("/api/chat/", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def _route_and_call(
+    user_id: str,
+    message: str,
+    history: List[ConversationTurn],
+    source: str,
+) -> ChatResponse:
+    """
+    Shared pipeline used by every inbound surface (`/api/chat/` JSON API
+    today, `/api/whatsapp/` Twilio webhook now, WhatsApp/Twilio sandbox
+    later): classify -> call the chosen model -> record metrics + a
+    routing-log entry the dashboard can render live.
+    """
     start = time.perf_counter()
 
-    decision = router.classify(req.message, req.conversation_history)
+    decision = router.classify(message, history)
     simulated_fallback = False
 
     try:
         if decision.target == "edge-compute":
-            reply = await call_edge_model(req.message, req.conversation_history)
+            reply = await call_edge_model(message, history)
         else:
-            reply = await call_heavy_model(req.message, req.conversation_history)
+            reply = await call_heavy_model(message, history)
         if not reply:
             raise ValueError("empty response from model endpoint")
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         logger.warning("Downstream model call failed (%s); falling back.", exc)
         if not ALLOW_SIMULATED_FALLBACK:
             raise HTTPException(status_code=502, detail=f"Model endpoint unreachable: {exc}")
-        reply = _simulated_reply(decision.target, req.message)
+        reply = _simulated_reply(decision.target, message)
         simulated_fallback = True
         METRICS["fallback_calls"] += 1
 
@@ -379,8 +412,24 @@ async def chat(req: ChatRequest):
 
     latency_ms = int((time.perf_counter() - start) * 1000)
 
+    ROUTING_LOG.append({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": source,  # "api" | "whatsapp"
+        "user_id": user_id,
+        "message": message[:200],
+        "reply": reply[:200],
+        "model_used": decision.model_name,
+        "target": decision.target,
+        "routing_reason": decision.routing_reason,
+        "complexity_score": decision.complexity_score,
+        "latency_ms": latency_ms,
+        "simulated_fallback": simulated_fallback,
+    })
+    if len(ROUTING_LOG) > ROUTING_LOG_MAX_ENTRIES:
+        del ROUTING_LOG[: len(ROUTING_LOG) - ROUTING_LOG_MAX_ENTRIES]
+
     return ChatResponse(
-        user_id=req.user_id,
+        user_id=user_id,
         reply=reply,
         model_used=decision.model_name,
         routing_reason=decision.routing_reason,
@@ -389,6 +438,60 @@ async def chat(req: ChatRequest):
         latency_ms=latency_ms,
         simulated_fallback=simulated_fallback,
     )
+
+
+@app.post("/api/chat/", response_model=ChatResponse)
+async def chat(req: ChatRequest):
+    return await _route_and_call(
+        user_id=req.user_id,
+        message=req.message,
+        history=req.conversation_history,
+        source="api",
+    )
+
+
+@app.get("/api/routing-log")
+async def routing_log(limit: int = 50):
+    """
+    Recent routing decisions (newest first) — feeds the dashboard's live
+    "Routing Log" feed so judges can watch messages get classified and
+    routed in real time, including inbound WhatsApp traffic.
+    """
+    return {"entries": list(reversed(ROUTING_LOG[-limit:]))}
+
+
+@app.post("/api/whatsapp/")
+async def whatsapp_webhook(Body: str = Form(...), From: str = Form(...)):
+    """
+    Twilio WhatsApp inbound webhook. Twilio POSTs each inbound message as
+    `application/x-www-form-urlencoded` form data; the two fields we need
+    are `Body` (the message text) and `From` (e.g. "whatsapp:+14155551234",
+    used as the user_id). Point your Twilio WhatsApp Sandbox's "WHEN A
+    MESSAGE COMES IN" webhook at this endpoint (see the ngrok instructions
+    in README_PHASE_2.md) and every inbound message flows through the same
+    ComputeRouter used by `/api/chat/`.
+
+    Maintains a short rolling per-sender history in-memory so multi-turn
+    negotiation detection works across a real WhatsApp thread, not just
+    within a single message.
+    """
+    history = WHATSAPP_HISTORY.setdefault(From, [])
+
+    chat_response = await _route_and_call(
+        user_id=From,
+        message=Body,
+        history=list(history),
+        source="whatsapp",
+    )
+
+    history.append(ConversationTurn(role="user", content=Body))
+    history.append(ConversationTurn(role="assistant", content=chat_response.reply))
+    if len(history) > WHATSAPP_HISTORY_MAX_TURNS:
+        del history[: len(history) - WHATSAPP_HISTORY_MAX_TURNS]
+
+    twiml = MessagingResponse()
+    twiml.message(chat_response.reply)
+    return Response(content=str(twiml), media_type="application/xml")
 
 
 if __name__ == "__main__":

@@ -2,3 +2,12 @@ fastapi>=0.139.0
 uvicorn[standard]>=0.51.0
 httpx>=0.28.0
 pydantic>=2.13.0
+
+# --- Phase 2: WhatsApp (Twilio) integration ---
+twilio>=9.0.0
+python-multipart>=0.0.9
+
+# --- Phase 2: Live dashboard ---
+streamlit>=1.38.0
+pandas>=2.2.0
+requests>=2.31.0
