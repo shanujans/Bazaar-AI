@@ -110,9 +110,34 @@ streamlit run dashboard.py
 ```
 
 **Terminal 3 — Webhook Tunneling (for Twilio integration)**
-```bash
-ngrok http 8080
-```
+
+Only needed if you're testing `/api/whatsapp/` against real Twilio. If ngrok isn't installed yet:
+
+1. **Install** (pick one):
+   ```bash
+   # macOS (Homebrew)
+   brew install ngrok/ngrok/ngrok
+
+   # Linux (apt)
+   curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+     | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null \
+     && echo "deb https://ngrok-agent.s3.amazonaws.com buster main" \
+     | sudo tee /etc/apt/sources.list.d/ngrok.list \
+     && sudo apt update && sudo apt install ngrok
+
+   # Windows (winget)
+   winget install ngrok.ngrok
+   ```
+   Or grab a prebuilt binary for your OS from [ngrok.com/download](https://ngrok.com/download) and put it on your `PATH`.
+2. **Authenticate (one-time, required even on the free tier)**: sign up free at [ngrok.com](https://ngrok.com), copy your authtoken from the dashboard's "Your Authtoken" page, then run:
+   ```bash
+   ngrok config add-authtoken <YOUR_AUTHTOKEN>
+   ```
+   Skipping this step is the #1 cause of `ngrok http` failing with an `ERR_NGROK_4018` auth error.
+3. **Run the tunnel**:
+   ```bash
+   ngrok http 8080
+   ```
 
 To test the installation manually, navigate to `http://localhost:8080/docs` (Swagger UI) or execute the automated verification suite:
 ```bash
@@ -192,7 +217,7 @@ When `routing_reason` includes `"Invoice/tool-generation"` **and** the heavy mod
 
 1. `POST /api/whatsapp/` accepts Twilio's `application/x-www-form-urlencoded` webhook body (`Body`, `From`), and runs it through the exact same `ComputeRouter.classify()` used by `/api/chat/`. This endpoint is built on explicit `Form` parameters to ensure reliable extraction.
 2. Per-sender rolling conversation memory (`WHATSAPP_HISTORY`, capped at 20 turns) is maintained server-side, since Twilio webhooks are stateless and each POST only carries the latest message — without this, the multi-turn negotiation signal could not fire on a real WhatsApp thread.
-3. Expose locally via ngrok:
+3. Expose locally via ngrok (see [Quickstart → Terminal 3](#quickstart) if ngrok isn't installed/authenticated yet):
    ```bash
    ngrok http 8080
    ```
