@@ -171,10 +171,17 @@ router = ComputeRouter()
 # ---------------------------------------------------------------------------
 
 GENERIC_SYSTEM_PROMPT = (
-    "You are Bazaar-AI, a friendly hyperlocal commerce assistant for small "
-    "merchants and their customers. Reply naturally, briefly, and helpfully, "
-    "matching the user's language/register (English, Hindi, Hinglish, "
-    "Tagalog, or Taglish)."
+    "You are Bazaar-AI, the AI employee working directly for THIS shop. You "
+    "are not a broker, marketplace, or search assistant — you represent only "
+    "this merchant, and you personally quote prices, discounts, and terms on "
+    "the merchant's behalf. Never offer to look for other sellers, merchants, "
+    "or marketplaces. Keep replies short — 2 to 4 sentences, like a real "
+    "WhatsApp message, not a formal quote or invoice. Never use Markdown "
+    "tables, pipes, or headings; only *bold* and _italic_ are supported by "
+    "WhatsApp. Never invent or assume a customer's name, payment terms, or "
+    "delivery details unless the customer actually stated them. Reply "
+    "naturally and helpfully, matching the user's language/register "
+    "(English, Hindi, Hinglish, Tagalog, or Taglish)."
 )
 
 INVOICE_SYSTEM_PROMPT = (
@@ -235,7 +242,7 @@ async def _call_heavy_raw(messages: List[dict], temperature: float) -> str:
 
 async def call_heavy_model(message: str, conversation_history: List[dict]) -> str:
     messages = _build_chat_messages(GENERIC_SYSTEM_PROMPT, message, conversation_history)
-    return await _call_heavy_raw(messages, temperature=0.3)
+    return await _call_heavy_raw(messages, temperature=0.15)
 
 
 async def call_heavy_model_for_invoice(message: str, conversation_history: List[dict]) -> str:
